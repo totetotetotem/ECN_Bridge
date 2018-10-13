@@ -91,12 +91,12 @@ static struct rte_eth_conf port_conf;
 struct rte_mempool * l2fwd_pktmbuf_pool = NULL;
 
 /* Per-port statistics struct */
-struct l2fwd_port_statistics {
+struct ecn_port_statistics {
 	uint64_t tx;
 	uint64_t rx;
 	uint64_t dropped;
 } __rte_cache_aligned;
-struct l2fwd_port_statistics port_statistics[RTE_MAX_ETHPORTS];
+struct ecn_port_statistics port_statistics[RTE_MAX_ETHPORTS];
 
 #define MAX_TIMER_PERIOD 86400 /* 1 day max */
 /* A tsc-based timer responsible for triggering statistics printout */
@@ -105,68 +105,50 @@ static uint64_t timer_period = 10; /* default period is 10 seconds */
 #define API_PORT 8080
 
 /* Print out statistics on packets dropped */
-//static void
-//print_stats(void)
-//{
-//	uint64_t total_packets_dropped, total_packets_tx, total_packets_rx;
-//	unsigned portid;
-//
-//	total_packets_dropped = 0;
-//	total_packets_tx = 0;
-//	total_packets_rx = 0;
-//
-//	const char clr[] = { 27, '[', '2', 'J', '\0' };
-//	const char topLeft[] = { 27, '[', '1', ';', '1', 'H','\0' };
-//
-//		/* Clear screen and move to top left */
-//	printf("%s%s", clr, topLeft);
-//
-//	printf("\nPort statistics ====================================");
-//
-//	for (portid = 0; portid < RTE_MAX_ETHPORTS; portid++) {
-//		/* skip disabled ports */
-//		if ((l2fwd_enabled_port_mask & (1 << portid)) == 0)
-//			continue;
-//		printf("\nStatistics for port %u ------------------------------"
-//			   "\nPackets sent: %24"PRIu64
-//			   "\nPackets received: %20"PRIu64
-//			   "\nPackets dropped: %21"PRIu64,
-//			   portid,
-//			   port_statistics[portid].tx,
-//			   port_statistics[portid].rx,
-//			   port_statistics[portid].dropped);
-//
-//		total_packets_dropped += port_statistics[portid].dropped;
-//		total_packets_tx += port_statistics[portid].tx;
-//		total_packets_rx += port_statistics[portid].rx;
-//	}
-//	printf("\nAggregate statistics ==============================="
-//		   "\nTotal packets sent: %18"PRIu64
-//		   "\nTotal packets received: %14"PRIu64
-//		   "\nTotal packets dropped: %15"PRIu64,
-//		   total_packets_tx,
-//		   total_packets_rx,
-//		   total_packets_dropped);
-//	printf("\n====================================================\n");
-//}
-
-
-/*
 static void
-l2fwd_simple_forward(struct rte_mbuf *m, unsigned portid)
+print_stats(void)
 {
-	unsigned dst_port;
-	int sent;
-	struct rte_eth_dev_tx_buffer *buffer;
+	uint64_t total_packets_dropped, total_packets_tx, total_packets_rx;
+	unsigned portid;
 
-	dst_port = l2fwd_dst_ports[portid];
+	total_packets_dropped = 0;
+	total_packets_tx = 0;
+	total_packets_rx = 0;
 
-	buffer = tx_buffer[dst_port];
-	sent = rte_eth_tx_buffer(dst_port, 0, buffer, m);
-	if (sent)
-		port_statistics[dst_port].tx += sent;
+	const char clr[] = { 27, '[', '2', 'J', '\0' };
+	const char topLeft[] = { 27, '[', '1', ';', '1', 'H','\0' };
+
+		/* Clear screen and move to top left */
+	printf("%s%s", clr, topLeft);
+
+	printf("\nPort statistics ====================================");
+
+	for (portid = 0; portid < RTE_MAX_ETHPORTS; portid++) {
+		/* skip disabled ports */
+		if ((l2fwd_enabled_port_mask & (1 << portid)) == 0)
+			continue;
+		printf("\nStatistics for port %u ------------------------------"
+			   "\nPackets sent: %24"PRIu64
+			   "\nPackets received: %20"PRIu64
+			   "\nPackets dropped: %21"PRIu64,
+			   portid,
+			   port_statistics[portid].tx,
+			   port_statistics[portid].rx,
+			   port_statistics[portid].dropped);
+
+		total_packets_dropped += port_statistics[portid].dropped;
+		total_packets_tx += port_statistics[portid].tx;
+		total_packets_rx += port_statistics[portid].rx;
+	}
+	printf("\nAggregate statistics ==============================="
+		   "\nTotal packets sent: %18"PRIu64
+		   "\nTotal packets received: %14"PRIu64
+		   "\nTotal packets dropped: %15"PRIu64,
+		   total_packets_tx,
+		   total_packets_rx,
+		   total_packets_dropped);
+	printf("\n====================================================\n");
 }
-*/
 
 static void
 ecn_process(struct rte_mbuf *m) 
@@ -285,7 +267,7 @@ l2fwd_main_loop(void)
 
 					/* do this only on master core */
 					if (lcore_id == rte_get_master_lcore()) {
-						//print_stats();
+						print_stats();
 						/* reset the timer */
 						timer_tsc = 0;
 					}
@@ -309,7 +291,6 @@ l2fwd_main_loop(void)
 			for (j = 0; j < nb_rx; j++) {
 				m = pkts_burst[j];
 				rte_prefetch0(rte_pktmbuf_mtod(m, void *));
-				//l2fwd_simple_forward(m, portid);
 				l2fwd_ecn_forward(m, portid);
 			}
 		}
