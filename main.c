@@ -13,11 +13,14 @@
 #include <setjmp.h>
 #include <stdarg.h>
 #include <ctype.h>
+#include <endian.h>
 #include <errno.h>
 #include <getopt.h>
 #include <signal.h>
 #include <stdbool.h>
 
+#include <rte_ether.h>
+#include <rte_ip.h>
 #include <rte_common.h>
 #include <rte_log.h>
 #include <rte_malloc.h>
@@ -54,6 +57,10 @@ static volatile bool force_quit;
 #define RTE_TEST_TX_DESC_DEFAULT 1024
 static uint16_t nb_rxd = RTE_TEST_RX_DESC_DEFAULT;
 static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
+
+/* congestion status */
+static bool congestion_10;
+static bool congestion_01;
 
 /* ethernet addresses of ports */
 static struct ether_addr l2fwd_ports_eth_addr[RTE_MAX_ETHPORTS];
@@ -100,52 +107,53 @@ struct l2fwd_port_statistics port_statistics[RTE_MAX_ETHPORTS];
 static uint64_t timer_period = 10; /* default period is 10 seconds */
 
 /* Print out statistics on packets dropped */
-static void
-print_stats(void)
-{
-	uint64_t total_packets_dropped, total_packets_tx, total_packets_rx;
-	unsigned portid;
+//static void
+//print_stats(void)
+//{
+//	uint64_t total_packets_dropped, total_packets_tx, total_packets_rx;
+//	unsigned portid;
+//
+//	total_packets_dropped = 0;
+//	total_packets_tx = 0;
+//	total_packets_rx = 0;
+//
+//	const char clr[] = { 27, '[', '2', 'J', '\0' };
+//	const char topLeft[] = { 27, '[', '1', ';', '1', 'H','\0' };
+//
+//		/* Clear screen and move to top left */
+//	printf("%s%s", clr, topLeft);
+//
+//	printf("\nPort statistics ====================================");
+//
+//	for (portid = 0; portid < RTE_MAX_ETHPORTS; portid++) {
+//		/* skip disabled ports */
+//		if ((l2fwd_enabled_port_mask & (1 << portid)) == 0)
+//			continue;
+//		printf("\nStatistics for port %u ------------------------------"
+//			   "\nPackets sent: %24"PRIu64
+//			   "\nPackets received: %20"PRIu64
+//			   "\nPackets dropped: %21"PRIu64,
+//			   portid,
+//			   port_statistics[portid].tx,
+//			   port_statistics[portid].rx,
+//			   port_statistics[portid].dropped);
+//
+//		total_packets_dropped += port_statistics[portid].dropped;
+//		total_packets_tx += port_statistics[portid].tx;
+//		total_packets_rx += port_statistics[portid].rx;
+//	}
+//	printf("\nAggregate statistics ==============================="
+//		   "\nTotal packets sent: %18"PRIu64
+//		   "\nTotal packets received: %14"PRIu64
+//		   "\nTotal packets dropped: %15"PRIu64,
+//		   total_packets_tx,
+//		   total_packets_rx,
+//		   total_packets_dropped);
+//	printf("\n====================================================\n");
+//}
 
-	total_packets_dropped = 0;
-	total_packets_tx = 0;
-	total_packets_rx = 0;
 
-	const char clr[] = { 27, '[', '2', 'J', '\0' };
-	const char topLeft[] = { 27, '[', '1', ';', '1', 'H','\0' };
-
-		/* Clear screen and move to top left */
-	printf("%s%s", clr, topLeft);
-
-	printf("\nPort statistics ====================================");
-
-	for (portid = 0; portid < RTE_MAX_ETHPORTS; portid++) {
-		/* skip disabled ports */
-		if ((l2fwd_enabled_port_mask & (1 << portid)) == 0)
-			continue;
-		printf("\nStatistics for port %u ------------------------------"
-			   "\nPackets sent: %24"PRIu64
-			   "\nPackets received: %20"PRIu64
-			   "\nPackets dropped: %21"PRIu64,
-			   portid,
-			   port_statistics[portid].tx,
-			   port_statistics[portid].rx,
-			   port_statistics[portid].dropped);
-
-		total_packets_dropped += port_statistics[portid].dropped;
-		total_packets_tx += port_statistics[portid].tx;
-		total_packets_rx += port_statistics[portid].rx;
-	}
-	printf("\nAggregate statistics ==============================="
-		   "\nTotal packets sent: %18"PRIu64
-		   "\nTotal packets received: %14"PRIu64
-		   "\nTotal packets dropped: %15"PRIu64,
-		   total_packets_tx,
-		   total_packets_rx,
-		   total_packets_dropped);
-	printf("\n====================================================\n");
-}
-
-
+/*
 static void
 l2fwd_simple_forward(struct rte_mbuf *m, unsigned portid)
 {
@@ -160,6 +168,57 @@ l2fwd_simple_forward(struct rte_mbuf *m, unsigned portid)
 	if (sent)
 		port_statistics[dst_port].tx += sent;
 }
+*/
+
+static void
+ecn_process(struct rte_mbuf *m) 
+{
+	struct ether_hdr *eth_header;
+	struct ipv6_hdr *ipv6_header;
+	uint32_t ipv6_data_offset;
+	uint32_t tc;
+	uint32_t vtc_flow;
+	
+	eth_header = rte_pktmbuf_mtod(m, struct ether_hdr *);
+	
+	if (eth_header->ether_type != rte_cpu_to_be_16(ETHER_TYPE_IPv6))
+		return;
+
+	ipv6_data_offset = sizeof(struct ether_hdr);
+	
+	ipv6_header = (struct ipv6_hdr *)(rte_pktmbuf_mtod(m, char*) + ipv6_data_offset);
+		
+	vtc_flow = htobe32(ipv6_header->vtc_flow);
+	tc = (vtc_flow >> 20) & 0xff;
+	if(tc & 0x2) // check ECT bit
+		tc |= 0x1; // set CE bit
+	vtc_flow = (vtc_flow & 0xfffff) | (tc << 20) | (vtc_flow & 0xf0000000);
+	ipv6_header->vtc_flow = be32toh(vtc_flow);
+	rte_memcpy(rte_pktmbuf_mtod(m, char*) + ipv6_data_offset, ipv6_header, sizeof(struct ipv6_hdr));
+	return;
+}
+
+static void
+l2fwd_ecn_forward(struct rte_mbuf *m, unsigned portid)
+{
+	unsigned dst_port;
+	int sent;
+	struct rte_eth_dev_tx_buffer *buffer;
+	
+	dst_port = l2fwd_dst_ports[portid];
+	
+	buffer = tx_buffer[dst_port];
+
+	if(congestion_01 == true)
+		ecn_process(m);
+
+	sent = rte_eth_tx_buffer(dst_port, 0, buffer, m);
+	if (sent)
+		port_statistics[dst_port].tx += sent;
+}
+
+
+
 
 /* main processing loop */
 static void
@@ -229,7 +288,7 @@ l2fwd_main_loop(void)
 
 					/* do this only on master core */
 					if (lcore_id == rte_get_master_lcore()) {
-						print_stats();
+						//print_stats();
 						/* reset the timer */
 						timer_tsc = 0;
 					}
@@ -253,7 +312,8 @@ l2fwd_main_loop(void)
 			for (j = 0; j < nb_rx; j++) {
 				m = pkts_burst[j];
 				rte_prefetch0(rte_pktmbuf_mtod(m, void *));
-				l2fwd_simple_forward(m, portid);
+				//l2fwd_simple_forward(m, portid);
+				l2fwd_ecn_forward(m, portid);
 			}
 		}
 	}
@@ -493,6 +553,8 @@ main(int argc, char **argv)
 	argc -= ret;
 	argv += ret;
 
+	congestion_01 = true;
+	congestion_10 = false;
 	force_quit = false;
 	signal(SIGINT, signal_handler);
 	signal(SIGTERM, signal_handler);
