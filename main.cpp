@@ -161,6 +161,7 @@ ecn_process(struct rte_mbuf *m)
 	
 	eth_header = rte_pktmbuf_mtod(m, struct ether_hdr *);
 	
+	/* skip non-ipv6 packet */
 	if (eth_header->ether_type != rte_cpu_to_be_16(ETHER_TYPE_IPv6))
 		return;
 
@@ -168,10 +169,11 @@ ecn_process(struct rte_mbuf *m)
 	
 	ipv6_header = (struct ipv6_hdr *)(rte_pktmbuf_mtod(m, char*) + ipv6_data_offset);
 		
+	/* traffic class update */
 	vtc_flow = htobe32(ipv6_header->vtc_flow);
 	tc = (vtc_flow >> 20) & 0xff;
-	if(tc & 0x2) // check ECT bit
-		tc |= 0x1; // set CE bit
+	if(tc & 0x2) 		// check ECT bit
+		tc |= 0x1; 	// set CE bit
 	vtc_flow = (vtc_flow & 0xfffff) | (tc << 20) | (vtc_flow & 0xf0000000);
 	ipv6_header->vtc_flow = be32toh(vtc_flow);
 	rte_memcpy(rte_pktmbuf_mtod(m, char*) + ipv6_data_offset, ipv6_header, sizeof(struct ipv6_hdr));
@@ -488,14 +490,21 @@ api_app(void* args)
 {
 	crow::SimpleApp app;
 
-	CROW_ROUTE(app, "/status")([](){
+	CROW_ROUTE(app, "/conf")([](){
 		crow::json::wvalue res;
 		res["congestion_01"] = congestion_conf[0] ? "true": "false";
 		res["congestion_10"] = congestion_conf[1] ? "true": "false";
 		return res;
 	});
 
-	CROW_ROUTE(app, "/set_status")
+	CROW_ROUTE(app, "/pkt_stat")([]() {
+		crow::json::wvalue res;
+		res["pkt0to1"] = port_statistics[1].tx;
+		res["pkt1to0"] = port_statistics[0].tx;
+		return res;
+	});
+
+	CROW_ROUTE(app, "/set_conf")
 	.methods("POST"_method)
 	([](const crow::request& req) {
 		std::vector<std::string> congestion_conf_key = {"congestion_01", "congestion_10"};
