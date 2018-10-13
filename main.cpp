@@ -18,6 +18,8 @@
 #include <getopt.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <pthread.h>
+#include <sstream>
 
 #include <rte_ether.h>
 #include <rte_ip.h>
@@ -42,6 +44,8 @@
 #include <rte_mempool.h>
 #include <rte_mbuf.h>
 
+#include "crow_all.h"
+
 static volatile bool force_quit;
 
 #define RTE_LOGTYPE_L2FWD RTE_LOGTYPE_USER1
@@ -59,8 +63,7 @@ static uint16_t nb_rxd = RTE_TEST_RX_DESC_DEFAULT;
 static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
 
 /* congestion status */
-static bool congestion_10;
-static bool congestion_01;
+static bool congestion_conf[2];
 
 /* ethernet addresses of ports */
 static struct ether_addr l2fwd_ports_eth_addr[RTE_MAX_ETHPORTS];
@@ -83,14 +86,7 @@ struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
 
 static struct rte_eth_dev_tx_buffer *tx_buffer[RTE_MAX_ETHPORTS];
 
-static struct rte_eth_conf port_conf = {
-	.rxmode = {
-		.split_hdr_size = 0,
-	},
-	.txmode = {
-		.mq_mode = ETH_MQ_TX_NONE,
-	},
-};
+static struct rte_eth_conf port_conf;
 
 struct rte_mempool * l2fwd_pktmbuf_pool = NULL;
 
@@ -105,6 +101,8 @@ struct l2fwd_port_statistics port_statistics[RTE_MAX_ETHPORTS];
 #define MAX_TIMER_PERIOD 86400 /* 1 day max */
 /* A tsc-based timer responsible for triggering statistics printout */
 static uint64_t timer_period = 10; /* default period is 10 seconds */
+
+#define API_PORT 8080
 
 /* Print out statistics on packets dropped */
 //static void
@@ -206,10 +204,9 @@ l2fwd_ecn_forward(struct rte_mbuf *m, unsigned portid)
 	struct rte_eth_dev_tx_buffer *buffer;
 	
 	dst_port = l2fwd_dst_ports[portid];
-	
 	buffer = tx_buffer[dst_port];
 
-	if(congestion_01 == true)
+	if(congestion_conf[dst_port] == true)
 		ecn_process(m);
 
 	sent = rte_eth_tx_buffer(dst_port, 0, buffer, m);
@@ -331,7 +328,7 @@ static void
 l2fwd_usage(const char *prgname)
 {
 	printf("%s [EAL options] -- -p PORTMASK [-q NQ]\n"
-	       "  -p PORTMASK: hexadecimal bitmask of ports to configure\n"
+	       "  -p PORTMASK: hexadecimal bitmask of ports to configure.\n"
 	       "  -q NQ: number of queue (=ports) per lcore (default is 1)\n"
 		   "  -T PERIOD: statistics will be refreshed each PERIOD seconds (0 to disable, 10 default, 86400 maximum)\n",
 	       prgname);
@@ -418,7 +415,7 @@ l2fwd_parse_args(int argc, char **argv)
 		/* portmask */
 		case 'p':
 			l2fwd_enabled_port_mask = l2fwd_parse_portmask(optarg);
-			if (l2fwd_enabled_port_mask == 0) {
+			if (l2fwd_enabled_port_mask != 3) {
 				printf("invalid portmask\n");
 				l2fwd_usage(prgname);
 				return -1;
@@ -533,6 +530,57 @@ signal_handler(int signum)
 	}
 }
 
+static void*
+api_app(void* args)
+{
+	crow::SimpleApp app;
+
+	CROW_ROUTE(app, "/status")([](){
+		crow::json::wvalue res;
+		res["congestion_01"] = congestion_conf[0] ? "true": "false";
+		res["congestion_10"] = congestion_conf[1] ? "true": "false";
+		return res;
+	});
+
+	CROW_ROUTE(app, "/set_status")
+	.methods("POST"_method)
+	([](const crow::request& req) {
+		std::vector<std::string> congestion_conf_key = {"congestion_01", "congestion_10"};
+		bool param_valid[2];
+		auto x = crow::json::load(req.body);
+		if(!x)
+			return crow::response(400);
+
+		for(int i = 0; i < 2; i++) {
+			try {
+				if (x.has(congestion_conf_key[i])) {
+					std::string s = x[congestion_conf_key[i]].s();
+					std::istringstream is(s);
+					is >> std::boolalpha >> congestion_conf[i];
+					param_valid[i] = true;
+				} else {
+					printf("param: %s not found\n", congestion_conf_key[i].c_str());
+				}
+			} catch (std::exception e) {
+				printf("param: %s is invalid\n", congestion_conf_key[i].c_str());
+			}
+		}
+		
+		crow::json::wvalue res;
+		if(param_valid[0] || param_valid[1]) {
+			res["status"] = "OK";
+		} else {
+			res["status"] = "NG";
+		}
+		res["congestion_01"] = congestion_conf[0] ? "true": "false";
+		res["congestion_10"] = congestion_conf[1] ? "true": "false";
+		return crow::response(res);
+	});
+
+	app.port(API_PORT).multithreaded().run();
+	return NULL;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -545,6 +593,7 @@ main(int argc, char **argv)
 	unsigned nb_ports_in_mask = 0;
 	unsigned int nb_lcores = 0;
 	unsigned int nb_mbufs;
+	pthread_t api_thread;
 
 	/* init EAL */
 	ret = rte_eal_init(argc, argv);
@@ -553,8 +602,6 @@ main(int argc, char **argv)
 	argc -= ret;
 	argv += ret;
 
-	congestion_01 = true;
-	congestion_10 = false;
 	force_quit = false;
 	signal(SIGINT, signal_handler);
 	signal(SIGTERM, signal_handler);
@@ -580,6 +627,7 @@ main(int argc, char **argv)
 	for (portid = 0; portid < RTE_MAX_ETHPORTS; portid++)
 		l2fwd_dst_ports[portid] = 0;
 	last_port = 0;
+
 
 	/*
 	 * Each logical core is assigned a dedicated TX queue on each port.
@@ -701,9 +749,9 @@ main(int argc, char **argv)
 				ret, portid);
 
 		/* Initialize TX buffers */
-		tx_buffer[portid] = rte_zmalloc_socket("tx_buffer",
+		tx_buffer[portid] = reinterpret_cast<rte_eth_dev_tx_buffer*>(rte_zmalloc_socket("tx_buffer",
 				RTE_ETH_TX_BUFFER_SIZE(MAX_PKT_BURST), 0,
-				rte_eth_dev_socket_id(portid));
+				rte_eth_dev_socket_id(portid)));
 		if (tx_buffer[portid] == NULL)
 			rte_exit(EXIT_FAILURE, "Cannot allocate buffer for tx on port %u\n",
 					portid);
@@ -747,6 +795,8 @@ main(int argc, char **argv)
 	}
 
 	check_all_ports_link_status(l2fwd_enabled_port_mask);
+
+	pthread_create(&api_thread, NULL, &api_app, NULL);
 
 	ret = 0;
 	/* launch per-lcore init on every lcore */

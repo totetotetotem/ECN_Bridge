@@ -5,7 +5,7 @@
 APP = l2fwd
 
 # all source are stored in SRCS-y
-SRCS-y := main.c
+SRCS-y := main.cpp
 
 # Build using pkg-config variables if possible
 $(shell pkg-config --exists libdpdk)
@@ -18,6 +18,8 @@ shared: build/$(APP)-shared
 static: build/$(APP)-static
 	ln -sf $(APP)-static build/$(APP)
 
+DPDKPATH = $(RTE_SDK)/$(RTE_TARGET)
+CC = g++
 PC_FILE := $(shell pkg-config --path libdpdk)
 CFLAGS += -O3 $(shell pkg-config --cflags libdpdk)
 LDFLAGS_SHARED = $(shell pkg-config --libs libdpdk)
@@ -45,11 +47,38 @@ endif
 
 # Default target, can be overridden by command line or environment
 RTE_TARGET ?= x86_64-native-linuxapp-gcc
+CXXFLAGS = -Wall -std=c++14 -I$(RTE_SDK)/$(RTE_TARGET)/include -include $(RTE_SDK)/$(RTE_TARGET)/include/rte_config.h
 
-include $(RTE_SDK)/mk/rte.vars.mk
+CC = g++
+LIBS = \
+	-m64 -pthread -march=native\
+	-Wl,--no-as-needed\
+	-Wl,--export-dynamic\
+	-L$(RTE_SDK)/$(RTE_TARGET)/lib \
+	-lpthread -lm -lrt -lpcap -ldl -lnuma -lboost_system\
+	-Wl,--whole-archive\
+	-Wl,--start-group\
+	-ldpdk \
+	-Wl,--end-group\
+	-Wl,--no-whole-archive
 
-CFLAGS += -O3
-CFLAGS += $(WERROR_FLAGS)
 
-include $(RTE_SDK)/mk/rte.extapp.mk
+all: build
+.PHONY: build
+build:
+	@mkdir -p build/app
+	$(CC) $(CXXFLAGS) $(SRCS-y) -o build/app/$(APP) $(LIBS)
+
+.PHONY: clean
+clean:
+	rm -f build/$(APP) build/$(APP)-static build/$(APP)-shared
+	rmdir --ignore-fail-on-non-empty build
+
+
+#include $(RTE_SDK)/mk/rte.vars.mk
+#
+#CFLAGS += -O3
+#CFLAGS += $(WERROR_FLAGS)
+#
+#include $(RTE_SDK)/mk/rte.extapp.mk
 endif
